@@ -1,0 +1,88 @@
+{
+  "Install": {
+    "LocalSubdirectory": "ASUP\\UserBackup"
+  },
+  "Task": {
+    "Name": "ASUP User Backup",
+    "Path": "\\",
+    "ManagedNames": [
+      "ASUP User Backup"
+    ],
+    "DelayMinutes": 3,
+    "DailyRunTime": "01:00",
+    "ExecutionTimeLimitHours": 6
+  },
+  "Update": {
+    "NetworkPath": "\\\\FS-00\\Scripts\\BackUpMng",
+    "WorkerFileName": "Backup-UserData.ps1",
+    "LauncherFileName": "Launcher-UserBackup.ps1",
+    "TaskRegistrarFileName": "Register-UserBackupTask.ps1",
+    "ConfigFileName": "BackupConfig.json",
+    "ContinueOnFailure": true,
+    "ShowWarningOnFailure": true
+  },
+  "Backup": {
+    "RootPath": "D:\\_BackUp_",
+    "HideRootFolder": true,
+    "CopiesToKeep": 2,
+    "MaxSourceSizeMB": 700,
+    "ScheduleMode": "Daily",
+    "WeeklyDay": "Monday",
+    "SafetyReserveMB": 64,
+    "ExcludeMasks": [
+      "*.tmp",
+      "~$*",
+      "*.mp3",
+      "*.wav",
+      "*.wma",
+      "*.aac",
+      "*.m4a",
+      "*.flac",
+      "*.ogg",
+      "*.opus",
+      "*.mp4",
+      "*.m4v",
+      "*.avi",
+      "*.mkv",
+      "*.mov",
+      "*.wmv",
+      "*.mpg",
+      "*.mpeg",
+      "*.webm",
+      "*.3gp",
+      "*.ts",
+      "*.mts"
+    ],
+    "Sources": [
+      {
+        "Name": "Desktop",
+        "DisplayName": "Рабочий стол",
+        "KnownFolder": "Desktop"
+      },
+      {
+        "Name": "Documents",
+        "DisplayName": "Документы",
+        "KnownFolder": "MyDocuments"
+      }
+    ]
+  },
+  "Logging": {
+    "MaxFileSizeMB": 1,
+    "FilesToKeep": 5,
+    "LauncherFileName": "Launcher.log"
+  },
+  "Messages": {
+    "CopyButtonText": "Копировать",
+    "CloseButtonText": "Закрыть",
+    "LowSpaceTitle": "Недостаточно места для резервной копии",
+    "LowSpaceText": "На диске {0} недостаточно свободного места для резервного копирования. Обратитесь в отдел АСУП.",
+    "SourceTooLargeTitle": "Превышен размер источника",
+    "SourceTooLargeText": "Размер источника «{0}» составляет {1:N2} МБ и превышает допустимый порог {2} МБ. Резервное копирование не выполнено. Обратитесь в отдел АСУП.",
+    "BackupErrorTitle": "Ошибка резервного копирования",
+    "BackupErrorText": "Не удалось выполнить резервное копирование. Обратитесь в отдел АСУП.\r\n\r\nПричина: {0}",
+    "UpdateWarningTitle": "Не удалось обновить скрипт резервного копирования",
+    "UpdateWarningText": "Не удалось получить обновление из сетевой папки. Будет использована локальная версия. Обратитесь в отдел АСУП.\r\n\r\nПричина: {0}",
+    "LauncherErrorTitle": "Ошибка запуска резервного копирования",
+    "LauncherErrorText": "Не удалось запустить рабочий скрипт резервного копирования. Обратитесь в отдел АСУП.\r\n\r\nПричина: {0}"
+  }
+}
