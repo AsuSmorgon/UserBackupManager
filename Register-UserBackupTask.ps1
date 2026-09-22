@@ -33,6 +33,37 @@ function Assert-SimpleFileName {
     }
 }
 
+function Resolve-AccountSid {
+    param([AllowEmptyString()][string]$Identity)
+
+    if ([string]::IsNullOrWhiteSpace($Identity)) {
+        return $null
+    }
+
+    try {
+        return ([System.Security.Principal.SecurityIdentifier]::new($Identity)).Value
+    }
+    catch {
+        try {
+            $account = [System.Security.Principal.NTAccount]::new($Identity)
+            return $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+        }
+        catch {
+            return $null
+        }
+    }
+}
+
+function Test-AccountSid {
+    param(
+        [AllowEmptyString()][string]$Identity,
+        [Parameter(Mandatory)][string]$ExpectedSid
+    )
+
+    $resolvedSid = Resolve-AccountSid -Identity $Identity
+    return $null -ne $resolvedSid -and $resolvedSid -ieq $ExpectedSid
+}
+
 function Get-ManagedTaskNames {
     param([Parameter(Mandatory)]$Config)
 
@@ -76,15 +107,19 @@ function Get-ManagedBackupTasks {
     $result = New-Object System.Collections.ArrayList
     foreach ($task in @(Get-ScheduledTask -ErrorAction Stop)) {
         $principalUser = [string]$task.Principal.UserId
-        $ownedByCurrentUser = $principalUser -ieq $CurrentUserSid -or $principalUser -ieq $CurrentUserName
+        $ownedByCurrentUser = Test-AccountSid -Identity $principalUser -ExpectedSid $CurrentUserSid
         $pathMatches = $task.TaskPath -ieq $TaskPath
         $nameMatches = $ManagedNames -contains $task.TaskName
         $markerMatches = ([string]$task.Description).Contains($Marker)
         $actionMatches = $false
 
         foreach ($taskAction in @($task.Actions)) {
-            if ([string]$taskAction.Execute -ieq $PowerShellExe -and
-                [string]$taskAction.Arguments -eq $expectedArguments) {
+            $executeProperty = $taskAction.PSObject.Properties['Execute']
+            $argumentsProperty = $taskAction.PSObject.Properties['Arguments']
+            if ($null -ne $executeProperty -and
+                $null -ne $argumentsProperty -and
+                [string]$executeProperty.Value -ieq $PowerShellExe -and
+                [string]$argumentsProperty.Value -eq $expectedArguments) {
                 $actionMatches = $true
                 break
             }
@@ -202,7 +237,7 @@ try {
     $existingTarget = @(Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue)
     foreach ($targetTask in $existingTarget) {
         $targetPrincipal = [string]$targetTask.Principal.UserId
-        $ownedByCurrentUser = $targetPrincipal -ieq $userSid -or $targetPrincipal -ieq $userName
+        $ownedByCurrentUser = Test-AccountSid -Identity $targetPrincipal -ExpectedSid $userSid
         if (-not $ownedByCurrentUser) {
             throw "Task '$taskPath$taskName' exists but is not owned by the current user backup installation."
         }
@@ -294,8 +329,9 @@ try {
         $registeredActions[0].WorkingDirectory -ine $localDirectory) {
         throw 'The registered task action did not pass validation.'
     }
-    if ([string]$registeredTask.Principal.UserId -ine $userSid -and
-        [string]$registeredTask.Principal.UserId -ine $userName) {
+    if (-not (Test-AccountSid `
+        -Identity ([string]$registeredTask.Principal.UserId) `
+        -ExpectedSid $userSid)) {
         throw 'The registered task principal did not pass validation.'
     }
     if ($registeredLogonTriggers.Count -ne 1 -or
