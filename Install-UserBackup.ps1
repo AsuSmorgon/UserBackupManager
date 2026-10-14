@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateNotNullOrEmpty()]
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'BackupConfig.json')
+    [string]$ConfigPath = (Join-Path $PSScriptRoot 'BackupConfig.json'),
+    [switch]$Diagnostic
 )
 
 Set-StrictMode -Version Latest
@@ -71,9 +72,20 @@ $artifactNames = @(
     $launcherLogFileName,
     $localDirectoriesListFileName
 )
-$uniqueArtifactNames = @($artifactNames | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
-if ($uniqueArtifactNames.Count -ne $artifactNames.Count) {
-    throw 'Worker, launcher, task registrar, configuration, launcher log and local directory list file names must be unique.'
+
+# Добавляем имена дополнительных файлов для проверки уникальности
+$additionalFileNames = @(
+    'Uninstall-UserBackup.ps1',
+    'Uninstall-UserBackup.cmd',
+    'Install-UserBackup.cmd',
+    'README.md',
+    'Debug-UserBackupTask.ps1'
+)
+
+$allArtifactNames = @($artifactNames) + @($additionalFileNames)
+$uniqueArtifactNames = @($allArtifactNames | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
+if ($uniqueArtifactNames.Count -ne $allArtifactNames.Count) {
+    throw 'Worker, launcher, task registrar, configuration, launcher log, local directory list and additional file names must be unique.'
 }
 
 $sourceWorker = Join-Path $PSScriptRoot $workerFileName
@@ -123,6 +135,30 @@ $deploymentItems = New-Object System.Collections.ArrayList
 [void]$deploymentItems.Add([pscustomobject]@{ Source = $sourceTaskRegistrar; Destination = $installedTaskRegistrar })
 [void]$deploymentItems.Add([pscustomobject]@{ Source = $ConfigPath; Destination = $installedConfig })
 
+# Добавляем дополнительные файлы для копирования
+$additionalFiles = @(
+    'Uninstall-UserBackup.ps1',
+    'Uninstall-UserBackup.cmd',
+    'Install-UserBackup.cmd',
+    'README.md',
+    'Debug-UserBackupTask.ps1'
+)
+
+foreach ($additionalFile in $additionalFiles) {
+    $sourceAdditionalFile = Join-Path $PSScriptRoot $additionalFile
+    $installedAdditionalFile = Join-Path $installDirectory $additionalFile
+    
+    if (Test-Path -LiteralPath $sourceAdditionalFile -PathType Leaf) {
+        [void]$deploymentItems.Add([pscustomobject]@{
+            Source = $sourceAdditionalFile
+            Destination = $installedAdditionalFile
+        })
+    }
+    elseif ($Diagnostic) {
+        Write-Host "[Diagnostic] Additional file not found: '$additionalFile'" -ForegroundColor Yellow
+    }
+}
+
 if (Test-Path -LiteralPath $installedLocalDirectoriesList) {
     if (-not (Test-Path -LiteralPath $installedLocalDirectoriesList -PathType Leaf)) {
         throw "Local directory list path exists but is not a file: '$installedLocalDirectoriesList'."
@@ -157,16 +193,34 @@ try {
         Copy-Item -LiteralPath $deploymentItem.Source -Destination $deploymentItem.Destination -Force
     }
 
-    & $powerShellExe `
-        -NoLogo `
-        -NoProfile `
-        -NonInteractive `
-        -ExecutionPolicy Bypass `
-        -File $installedTaskRegistrar `
-        -ConfigPath $installedConfig
+    # Формируем аргументы для запуска регистратора
+    $taskRegistrarArgs = @("-ConfigPath", "`"$installedConfig`"")
+    if ($Diagnostic) {
+        $taskRegistrarArgs += "-Diagnostic"
+    }
+    
+    # Правильный вызов PowerShell с аргументами
+    & $powerShellExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installedTaskRegistrar @taskRegistrarArgs
     $taskRegistrarExitCode = $LASTEXITCODE
     if ($taskRegistrarExitCode -ne 0) {
-        throw "Task registrar failed with exit code $taskRegistrarExitCode."
+        # Получаем информацию о системе для диагностики
+        $systemInfo = @{
+            ComputerName = $env:COMPUTERNAME
+            UserName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            OSVersion = (Get-CimInstance Win32_OperatingSystem).Caption
+            PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+            DateTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        }
+        
+        $errorDetails = "Task registrar failed with exit code $taskRegistrarExitCode.`n"
+        $errorDetails += "System information:`n"
+        foreach ($key in $systemInfo.Keys) {
+            $errorDetails += "  $key : $($systemInfo[$key])`n"
+        }
+        $errorDetails += "Task registrar path: $installedTaskRegistrar`n"
+        $errorDetails += "Config path: $installedConfig"
+        
+        throw $errorDetails
     }
 
     $deploymentCommitted = $true

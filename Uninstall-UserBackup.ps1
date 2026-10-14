@@ -1,9 +1,11 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [ValidateNotNullOrEmpty()]
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'BackupConfig.json'),
+    [string]$ConfigPath,
 
-    [string]$InstallDirectory
+    [string]$InstallDirectory,
+    
+    [switch]$Diagnostic
 )
 
 Set-StrictMode -Version Latest
@@ -49,6 +51,37 @@ function Add-UniqueString {
         }
     }
     [void]$List.Add($Value)
+}
+
+function Resolve-AccountSid {
+    param([AllowEmptyString()][string]$Identity)
+
+    if ([string]::IsNullOrWhiteSpace($Identity)) {
+        return $null
+    }
+
+    try {
+        return ([System.Security.Principal.SecurityIdentifier]::new($Identity)).Value
+    }
+    catch {
+        try {
+            $account = [System.Security.Principal.NTAccount]::new($Identity)
+            return $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+        }
+        catch {
+            return $null
+        }
+    }
+}
+
+function Test-AccountSid {
+    param(
+        [AllowEmptyString()][string]$Identity,
+        [Parameter(Mandatory)][string]$ExpectedSid
+    )
+
+    $resolvedSid = Resolve-AccountSid -Identity $Identity
+    return $null -ne $resolvedSid -and $resolvedSid -ieq $ExpectedSid
 }
 
 function Add-ConfigMetadata {
@@ -105,42 +138,100 @@ function Test-TaskAssociatedWithProject {
         [Parameter(Mandatory)][string]$PowerShellExe,
         [Parameter(Mandatory)][string]$CurrentUserSid,
         [Parameter(Mandatory)][string]$CurrentUserName,
-        [Parameter(Mandatory)][string]$Marker
+        [Parameter(Mandatory)][string]$Marker,
+        [switch]$Diagnostic
     )
 
     $principalUser = [string]$Task.Principal.UserId
-    $ownedByCurrentUser = $principalUser -ieq $CurrentUserSid -or
-        $principalUser -ieq $CurrentUserName
-    if (-not $ownedByCurrentUser) {
-        return $false
+    $ownedByCurrentUser = Test-AccountSid -Identity $principalUser -ExpectedSid $CurrentUserSid
+    if (-not $ownedByCurrentUser -and -not [string]::IsNullOrWhiteSpace($CurrentUserName)) {
+        $currentUserNameWithoutDomain = $CurrentUserName
+        if ($CurrentUserName.Contains('\')) {
+            $currentUserNameWithoutDomain = $CurrentUserName.Split('\')[-1]
+        }
+        # fallback: compare principal directly to current user name (case-insensitive)
+        $ownedByCurrentUser = $principalUser -ieq $CurrentUserName -or
+            $principalUser -ieq $currentUserNameWithoutDomain
     }
 
     $markerMatches = ([string]$Task.Description).Contains($Marker)
     if ($markerMatches) {
+        # If the task has the project marker, consider it associated regardless of owner
+        if ($Diagnostic) {
+            Write-Host "[Diagnostic] Task '$($task.TaskPath)$($task.TaskName)' matches marker" -ForegroundColor Green
+        }
         return $true
+    }
+
+    if (-not $ownedByCurrentUser) {
+        if ($Diagnostic) {
+            Write-Host "[Diagnostic] Task '$($task.TaskPath)$($task.TaskName)' not owned by current user (principal: '$principalUser', current: '$CurrentUserName')" -ForegroundColor Red
+        }
+        return $false
     }
 
     $pathMatches = $TaskPaths -contains [string]$Task.TaskPath
     $nameMatches = $TaskNames -contains [string]$Task.TaskName
+    
+    if ($Diagnostic) {
+        Write-Host "[Diagnostic] Task '$($task.TaskPath)$($task.TaskName)'" -ForegroundColor Cyan
+        Write-Host "  Principal.UserId: '$principalUser'" -ForegroundColor Gray
+        Write-Host "  Owned by current user: $ownedByCurrentUser" -ForegroundColor $(if ($ownedByCurrentUser) { 'Green' } else { 'Red' })
+        Write-Host "  Path matches: $pathMatches (task path: '$($task.TaskPath)', allowed paths: $($TaskPaths -join ', '))" -ForegroundColor $(if ($pathMatches) { 'Green' } else { 'Red' })
+        Write-Host "  Name matches: $nameMatches (task name: '$($task.TaskName)', allowed names: $($TaskNames -join ', '))" -ForegroundColor $(if ($nameMatches) { 'Green' } else { 'Red' })
+        Write-Host "  Marker matches: $markerMatches (description: '$($task.Description)')" -ForegroundColor $(if ($markerMatches) { 'Green' } else { 'Red' })
+    }
+    
     if ($pathMatches -and $nameMatches) {
+        if ($Diagnostic) {
+            Write-Host "  => MATCH! Task associated with project (path and name match)" -ForegroundColor Green
+        }
         return $true
     }
 
+    $actionMatches = $false
     foreach ($taskAction in @($Task.Actions)) {
-        if ([string]$taskAction.Execute -ine $PowerShellExe) {
+        $executeProperty = $taskAction.PSObject.Properties['Execute']
+        $argumentsProperty = $taskAction.PSObject.Properties['Arguments']
+        if ($null -eq $executeProperty -or $null -eq $argumentsProperty) {
+            continue
+        }
+        if ([string]$executeProperty.Value -ine $PowerShellExe) {
             continue
         }
         foreach ($expectedArgument in $ExpectedArguments) {
-            if ([string]$taskAction.Arguments -eq $expectedArgument) {
+            if ([string]$argumentsProperty.Value -eq $expectedArgument) {
+                $actionMatches = $true
+                if ($Diagnostic) {
+                    Write-Host "  Action matches: true (arguments: '$($argumentsProperty.Value)')" -ForegroundColor Green
+                }
                 return $true
             }
         }
+    }
+    
+    if ($Diagnostic) {
+        Write-Host "  Action matches: $actionMatches" -ForegroundColor $(if ($actionMatches) { 'Green' } else { 'Red' })
+        if (-not $actionMatches -and @($Task.Actions).Count -gt 0) {
+            Write-Host "  Task action details:" -ForegroundColor Gray
+            foreach ($taskAction in @($Task.Actions)) {
+                $executeProperty = $taskAction.PSObject.Properties['Execute']
+                $argumentsProperty = $taskAction.PSObject.Properties['Arguments']
+                $executeValue = if ($executeProperty) { $executeProperty.Value } else { $null }
+                $argumentsValue = if ($argumentsProperty) { $argumentsProperty.Value } else { $null }
+                Write-Host "    Execute: $executeValue, Arguments: $argumentsValue" -ForegroundColor Gray
+            }
+        }
+        Write-Host "  => NOT associated with project" -ForegroundColor DarkGray
     }
 
     return $false
 }
 
 try {
+    if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+        $ConfigPath = Join-Path $PSScriptRoot 'BackupConfig.json'
+    }
     $ConfigPath = [System.IO.Path]::GetFullPath($ConfigPath)
     $sourceConfig = Read-BackupConfig -Path $ConfigPath
 
@@ -228,8 +319,31 @@ try {
     $userSid = $userIdentity.User.Value
     $userName = $userIdentity.Name
 
+    if ([string]::IsNullOrWhiteSpace($userSid)) {
+        throw 'Cannot determine current user SID. The Windows identity may be invalid or not fully resolved.'
+    }
+    try {
+        $null = [System.Security.Principal.SecurityIdentifier]::new($userSid)
+    }
+    catch {
+        throw "Current user SID is not valid: '$userSid'. $_"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        throw 'Cannot determine current user name.'
+    }
+
     $associatedTasks = New-Object System.Collections.ArrayList
-    foreach ($task in @(Get-ScheduledTask -ErrorAction Stop)) {
+    $allTasks = @(Get-ScheduledTask -ErrorAction Stop)
+    if ($Diagnostic) {
+        Write-Host "[Diagnostic] Total tasks found: $($allTasks.Count)" -ForegroundColor Yellow
+        Write-Host "[Diagnostic] Looking for tasks with:" -ForegroundColor Yellow
+        Write-Host "[Diagnostic]   Names: $($taskNames -join ', ')" -ForegroundColor Yellow
+        Write-Host "[Diagnostic]   Paths: $($taskPaths -join ', ')" -ForegroundColor Yellow
+        Write-Host "[Diagnostic]   Current user: '$userName' (SID: $userSid)" -ForegroundColor Yellow
+        Write-Host "[Diagnostic]   Marker: '$managedMarker'" -ForegroundColor Yellow
+    }
+    foreach ($task in $allTasks) {
         if (Test-TaskAssociatedWithProject `
             -Task $task `
             -TaskNames @($taskNames) `
@@ -238,8 +352,16 @@ try {
             -PowerShellExe $powerShellExe `
             -CurrentUserSid $userSid `
             -CurrentUserName $userName `
-            -Marker $managedMarker) {
+            -Marker $managedMarker `
+            -Diagnostic:$Diagnostic) {
             [void]$associatedTasks.Add($task)
+        }
+    }
+    
+    if ($Diagnostic) {
+        Write-Host "[Diagnostic] Total associated tasks found: $($associatedTasks.Count)" -ForegroundColor $(if ($associatedTasks.Count -gt 0) { 'Green' } else { 'Red' })
+        foreach ($match in $associatedTasks) {
+            Write-Host "  - '$($match.TaskPath)$($match.TaskName)'" -ForegroundColor Green
         }
     }
 
