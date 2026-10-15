@@ -153,6 +153,9 @@ foreach ($additionalFile in $additionalFiles) {
             Source = $sourceAdditionalFile
             Destination = $installedAdditionalFile
         })
+        if ($Diagnostic) {
+            Write-Host "[Diagnostic] Will copy additional file: '$additionalFile'" -ForegroundColor Green
+        }
     }
     elseif ($Diagnostic) {
         Write-Host "[Diagnostic] Additional file not found: '$additionalFile'" -ForegroundColor Yellow
