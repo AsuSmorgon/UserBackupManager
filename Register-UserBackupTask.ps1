@@ -367,10 +367,20 @@ try {
                 -UserId $UserIdToTry `
                 -LogonType Interactive `
                 -RunLevel Limited
+            
+            # ВАЖНО: Если UserId начинается с ".\" (локальный компьютер),
+            # Windows требует, чтобы задача была в корневом пути "\"
+            $actualTaskPath = $taskPath
+            if ($UserIdToTry.StartsWith(".\")) {
+                if ($Diagnostic) {
+                    Write-Host "[Diagnostic] Using root path for local computer format: '$UserIdToTry'" -ForegroundColor Yellow
+                }
+                $actualTaskPath = '\'
+            }
                 
             Register-ScheduledTask `
                 -TaskName $taskName `
-                -TaskPath $taskPath `
+                -TaskPath $actualTaskPath `
                 -Action $action `
                 -Trigger $taskTriggersForAttempt `
                 -Principal $principal `
@@ -380,10 +390,10 @@ try {
                 -ErrorAction Stop | Out-Null
                 
             if ($Diagnostic) {
-                Write-Host "[Diagnostic] Successfully registered task with UserId: '$UserIdToTry'" -ForegroundColor Green
+                Write-Host "[Diagnostic] Successfully registered task with UserId: '$UserIdToTry' at path: '$actualTaskPath'" -ForegroundColor Green
                 # Сразу проверяем, видна ли задача
                 try {
-                    $checkTask = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+                    $checkTask = Get-ScheduledTask -TaskName $taskName -TaskPath $actualTaskPath -ErrorAction SilentlyContinue
                     if ($checkTask) {
                         Write-Host "[Diagnostic] Task found after registration: Principal.UserId = '$([string]$checkTask.Principal.UserId)'" -ForegroundColor Green
                     } else {
@@ -459,14 +469,14 @@ try {
     $cleanupStarted = $true
     Remove-TaskInstances -Tasks $existingManagedTasks
 
-    # Пробуем разные форматы UserId
+    # Используем только имя пользователя, НИКОГДА не SID!
+    # SID вызывает ошибку "Task.Path must be the root task path: \"
     $registrationAttempts = New-Object System.Collections.ArrayList
     
-    # Основные форматы
+    # Основные форматы (без SID!)
     [void]$registrationAttempts.Add(@{ UserId = $taskUserId; Description = "name without domain" })
     [void]$registrationAttempts.Add(@{ UserId = $userName; Description = "full user name" })
     [void]$registrationAttempts.Add(@{ UserId = ".\$userNameWithoutDomain"; Description = "local user format" })
-    [void]$registrationAttempts.Add(@{ UserId = $userSid; Description = "user SID" })
     
     # Специальные форматы для случая, когда имя пользователя совпадает с именем компьютера
     if ($isSameAsComputer) {
@@ -480,7 +490,7 @@ try {
     }
     
     if ($Diagnostic) {
-        Write-Host "[Diagnostic] Registration attempts order:" -ForegroundColor Yellow
+        Write-Host "[Diagnostic] Registration attempts order (NO SID!):" -ForegroundColor Yellow
         for ($i = 0; $i -lt $registrationAttempts.Count; $i++) {
             $attempt = $registrationAttempts[$i]
             Write-Host "[Diagnostic]   $($i+1). '$($attempt.UserId)' - $($attempt.Description)" -ForegroundColor Yellow
@@ -642,13 +652,21 @@ try {
     
     # Check if the found task matches expected name and path
     $foundTask = $remainingManagedTasks[0]
-    if ($foundTask.TaskName -ine $taskName -or $foundTask.TaskPath -ine $taskPath) {
+    
+    # Для случая совпадающих имен пользователя и компьютера, задача может быть создана в корне
+    $acceptablePaths = @($taskPath)
+    if ($isSameAsComputer) {
+        $acceptablePaths += '\'  # Добавляем корневой путь как допустимый
+    }
+    
+    if ($foundTask.TaskName -ine $taskName -or ($acceptablePaths -notcontains $foundTask.TaskPath)) {
         if ($Diagnostic) {
             Write-Host "[Diagnostic] Found task doesn't match expected name/path:" -ForegroundColor Yellow
-            Write-Host "[Diagnostic]   Expected: '$taskPath$taskName'" -ForegroundColor Yellow
+            Write-Host "[Diagnostic]   Expected name: '$taskName'" -ForegroundColor Yellow
+            Write-Host "[Diagnostic]   Expected path (acceptable): $($acceptablePaths -join ', ')" -ForegroundColor Yellow
             Write-Host "[Diagnostic]   Found: '$($foundTask.TaskPath)$($foundTask.TaskName)'" -ForegroundColor Yellow
             Write-Host "[Diagnostic]   Name matches: $($foundTask.TaskName -ieq $taskName)" -ForegroundColor Yellow
-            Write-Host "[Diagnostic]   Path matches: $($foundTask.TaskPath -ieq $taskPath)" -ForegroundColor Yellow
+            Write-Host "[Diagnostic]   Path is acceptable: $($acceptablePaths -contains $foundTask.TaskPath)" -ForegroundColor Yellow
         }
         # Be more forgiving - if the task is owned by current user and has right actions/marker, accept it
         $isOwned = Test-AccountSid -Identity ([string]$foundTask.Principal.UserId) -ExpectedSid $userSid

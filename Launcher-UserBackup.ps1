@@ -325,8 +325,8 @@ function Assert-BackupConfig {
         throw 'One or more numeric configuration values are outside the supported range.'
     }
 
-    if ([string]$Config.Task.Path -ne '\') {
-        throw 'Task.Path must be the root task path: \.'
+    if (-not [string]$Config.Task.Path.StartsWith('\') -or -not [string]$Config.Task.Path.EndsWith('\')) {
+        throw 'Task.Path must start and end with a backslash (e.g., \ASUP\User BackUp Manager\).'
     }
     $managedTaskNames = @($Config.Task.ManagedNames)
     if ($managedTaskNames.Count -eq 0) {
@@ -421,12 +421,8 @@ try {
         $updatedConfig = Read-BackupConfig -Path $tempConfigPath
         Assert-BackupConfig -Config $updatedConfig
 
-        if ([string]$updatedConfig.Update.LauncherFileName -ine $currentLauncherFileName) {
-            throw 'Update.LauncherFileName can only be changed by running the installer.'
-        }
-        if ([string]$updatedConfig.Update.ConfigFileName -ine $currentConfigFileName) {
-            throw 'Update.ConfigFileName can only be changed by running the installer.'
-        }
+        # LauncherFileName теперь можно менять, так как лаунчер обновляется
+        # ConfigFileName можно менять, так как конфигурация обновляется
 
         $workerFileName = [string]$updatedConfig.Update.WorkerFileName
         $networkWorkerPath = Join-Path $networkPath $workerFileName
@@ -440,13 +436,80 @@ try {
         Copy-Item -LiteralPath $networkTaskRegistrarPath -Destination $tempTaskRegistrarPath -Force
         Assert-PowerShellSyntax -Path $tempTaskRegistrarPath
 
+        # Загружаем и проверяем лаунчер из сети
+        $launcherFileName = [string]$updatedConfig.Update.LauncherFileName
+        $networkLauncherPath = Join-Path $networkPath $launcherFileName
+        $tempLauncherPath = Join-Path $localDirectory ($launcherFileName + '.' + $updateId + '.update')
+        Copy-Item -LiteralPath $networkLauncherPath -Destination $tempLauncherPath -Force
+        Assert-PowerShellSyntax -Path $tempLauncherPath
+
+        # Загружаем список локальных директорий из сети
+        $localDirsListFileName = $script:LocalDirectoriesListFileName
+        $networkLocalDirsPath = Join-Path $networkPath $localDirsListFileName
+        $tempLocalDirsPath = Join-Path $localDirectory ($localDirsListFileName + '.' + $updateId + '.update')
+        if (Test-Path -LiteralPath $networkLocalDirsPath -PathType Leaf) {
+            Copy-Item -LiteralPath $networkLocalDirsPath -Destination $tempLocalDirsPath -Force
+        } else {
+            # Если файла нет в сети, создаем пустой временный файл
+            [System.IO.File]::WriteAllText($tempLocalDirsPath, '', [System.Text.Encoding]::UTF8)
+        }
+
+        # Загружаем список локальных директорий из сети
+        $localDirsListFileName = $script:LocalDirectoriesListFileName
+        $networkLocalDirsPath = Join-Path $networkPath $localDirsListFileName
+        $tempLocalDirsPath = Join-Path $localDirectory ($localDirsListFileName + '.' + $updateId + '.update')
+        if (Test-Path -LiteralPath $networkLocalDirsPath -PathType Leaf) {
+            Copy-Item -LiteralPath $networkLocalDirsPath -Destination $tempLocalDirsPath -Force
+        } else {
+            # Если файла нет в сети, создаем пустой временный файл
+            [System.IO.File]::WriteAllText($tempLocalDirsPath, '', [System.Text.Encoding]::UTF8)
+        }
+
+        # Загружаем установочные скрипты из сети
+        $installScripts = @(
+            'Install-UserBackup.ps1',
+            'Uninstall-UserBackup.ps1'
+        )
+        
+        $tempScriptPaths = @{}
+        
+        foreach ($scriptName in $installScripts) {
+            $networkScriptPath = Join-Path $networkPath $scriptName
+            $tempScriptPath = Join-Path $localDirectory ($scriptName + '.' + $updateId + '.update')
+            $localScriptPath = Join-Path $localDirectory $scriptName
+            
+            if (Test-Path -LiteralPath $networkScriptPath -PathType Leaf) {
+                Copy-Item -LiteralPath $networkScriptPath -Destination $tempScriptPath -Force
+                Assert-PowerShellSyntax -Path $tempScriptPath
+                $tempScriptPaths[$scriptName] = $tempScriptPath
+            }
+        }
+
         $localWorkerPath = Join-Path $localDirectory $workerFileName
         $localTaskRegistrarPath = Join-Path $localDirectory $taskRegistrarFileName
+        $localLauncherPath = Join-Path $localDirectory $launcherFileName
+        $localDirsListPath = Join-Path $localDirectory $localDirsListFileName
+        $localInstallPath = Join-Path $localDirectory 'Install-UserBackup.ps1'
+        $localUninstallPath = Join-Path $localDirectory 'Uninstall-UserBackup.ps1'
+        
+        # Все файлы для обновления
         $updateItems = @(
+            [pscustomobject]@{ Source = $tempConfigPath; Destination = $ConfigPath },
             [pscustomobject]@{ Source = $tempWorkerPath; Destination = $localWorkerPath },
             [pscustomobject]@{ Source = $tempTaskRegistrarPath; Destination = $localTaskRegistrarPath },
-            [pscustomobject]@{ Source = $tempConfigPath; Destination = $ConfigPath }
+            [pscustomobject]@{ Source = $tempLocalDirsPath; Destination = $localDirsListPath }
         )
+        
+        # Добавляем установочные скрипты, если они были загружены
+        if ($tempScriptPaths.ContainsKey('Install-UserBackup.ps1')) {
+            $updateItems += [pscustomobject]@{ Source = $tempScriptPaths['Install-UserBackup.ps1']; Destination = $localInstallPath }
+        }
+        if ($tempScriptPaths.ContainsKey('Uninstall-UserBackup.ps1')) {
+            $updateItems += [pscustomobject]@{ Source = $tempScriptPaths['Uninstall-UserBackup.ps1']; Destination = $localUninstallPath }
+        }
+        
+        # Лаунчер обновляем в последнюю очередь
+        $updateItems += [pscustomobject]@{ Source = $tempLauncherPath; Destination = $localLauncherPath }
 
         $hasActualUpdate = $false
         foreach ($updateItem in $updateItems) {
@@ -545,7 +608,17 @@ try {
             }
 
             try {
-                Write-LauncherLog -Level INFO -Message "Update and task registration completed successfully from '$networkPath'."
+                $updatedFiles = @('configuration', 'worker', 'task registrar', 'local directories list')
+                if ($tempScriptPaths.ContainsKey('Install-UserBackup.ps1')) {
+                    $updatedFiles += 'installer'
+                }
+                if ($tempScriptPaths.ContainsKey('Uninstall-UserBackup.ps1')) {
+                    $updatedFiles += 'uninstaller'
+                }
+                $updatedFiles += 'launcher'
+                
+                $filesList = $updatedFiles -join ', '
+                Write-LauncherLog -Level INFO -Message "Update completed successfully from '$networkPath'. Updated files: $filesList."
             }
             catch {
                 # Logging after commit must not roll back a valid update.
