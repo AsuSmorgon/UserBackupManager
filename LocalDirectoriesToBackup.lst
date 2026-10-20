@@ -1,5 +1,9 @@
 :: Enable or Disable this list - True / False
 False
 
+:: Full path
+d:\Personal\
+
+:: Relative path user dir
 Pictures
-Links
+:: Links

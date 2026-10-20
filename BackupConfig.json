@@ -15,7 +15,7 @@
     "ExecutionTimeLimitHours": 6
   },
   "Update": {
-    "NetworkPath": "\\\\FS-01\\Scripts\\UserBackupManager / ",
+    "NetworkPath": "\\\\FS-01\\Scripts\\UserBackupManager\\",
     "WorkerFileName": "Backup-UserData.ps1",
     "LauncherFileName": "Launcher-UserBackup.ps1",
     "TaskRegistrarFileName": "Register-UserBackupTask.ps1",
